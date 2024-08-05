@@ -21,7 +21,16 @@ var (
 	procGetWindowText            = mod.NewProc("GetWindowTextW")
 	procGetWindowTextLength      = mod.NewProc("GetWindowTextLengthW")
 	procGetWindowThreadProcessId = mod.NewProc("GetWindowThreadProcessId")
+
+	modOleacc                    = windows.NewLazyDLL("Oleacc.dll")
+	procGetProcessHandleFromHwnd = modOleacc.NewProc("GetProcessHandleFromHwnd")
 )
+
+/*
+HANDLE WINAPI GetProcessHandleFromHwnd(
+  _In_ HWND hwnd
+);
+*/
 
 type (
 	HANDLE uintptr
@@ -30,41 +39,31 @@ type (
 
 func GetWindowTextLength(hwnd HWND) int {
 	ret, _, _ := procGetWindowTextLength.Call(
-		uintptr(hwnd))
+		uintptr(hwnd),
+	)
 
 	return int(ret)
 }
 
-func GetProcessProductName(path string) string {
+func GetProcessProductName(path string) (string, error) {
 	f, err := fileversion.New(path)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	return f.ProductName()
+	return f.ProductName(), nil
 }
 
-func GetProcessPath(pid uint32) string {
+func GetProcessPath(hwnd HWND) (string, error) {
+	//func GetProcessPath(pid uint32) string {
 
-	// https://github.com/microsoft/hcsshim/blob/main/internal/uvm/stats.go
-	// https://github.com/microsoft/hcsshim/blob/main/LICENSE (MIT)
+	ret, _, _ := procGetProcessHandleFromHwnd.Call(
+		uintptr(hwnd),
+	)
 
-	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_VM_READ, false, pid)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	defer func(openedProcess windows.Handle) {
-		// If we don't return this process handle, close it so it doesn't leak.
-		if p == 0 {
-			windows.Close(openedProcess)
-		}
-	}(p)
-	// Querying vmmem's image name as a win32 path returns ERROR_GEN_FAILURE
-	// for some reason, so we query it as an NT path instead.
-	name, err := process.QueryFullProcessImageName(p, process.ImageNameFormatWin32Path)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	return name
+	procHandle := windows.Handle(ret)
+	name, err := process.QueryFullProcessImageName(procHandle, process.ImageNameFormatWin32Path)
+
+	return name, err
 }
 
 func GetWindowThreadProcessId(hwnd HWND) uintptr {
@@ -141,22 +140,27 @@ func main() {
 				filename = currentFileName
 				file, err = os.Create(filepath.Join(path, filename))
 				if err != nil {
-					log.Fatalln("failed to open file", err)
+					panic(err)
 				}
 				w = csv.NewWriter(file)
 				if err := w.Write(header); err != nil {
-					log.Fatalln("error writing record to file", err)
+					panic(err)
 				}
 			}
 			if currentString != lastString {
+				lastString = currentString
 				t = time.Now()
 
 				prPid := GetWindowThreadProcessId(HWND(hwnd))
 				pid := fmt.Sprint(prPid)
-				processPath := GetProcessPath(uint32(prPid))
-				processProduct := GetProcessProductName(processPath)
-
-				lastString = currentString
+				processPath, pathErr := GetProcessPath(HWND(hwnd))
+				var processProduct string
+				if pathErr != nil {
+					processProduct = pathErr.Error()
+					//processPath = "File path not accessable:" + err.Error()
+				} else {
+					processProduct, _ = GetProcessProductName(processPath)
+				}
 
 				row := []string{
 					t.Format(time.RFC3339),
@@ -166,10 +170,10 @@ func main() {
 				}
 				fmt.Println(row)
 				if err := w.Write(row); err != nil {
-					log.Fatalln("error writing record to file", err)
+
+					panic(err)
 				}
 				w.Flush()
-
 			}
 		}
 	}
